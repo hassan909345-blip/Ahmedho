@@ -1,0 +1,66 @@
+name: Build APK - SDK fix
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/repair-build.yml, 'app/**', build.gradle.kts, settings.gradle.kts]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: {group: android-main, cancel-in-progress: false}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+    - uses: actions/checkout@v4
+    - name: Correct SDK setup and Java targets
+      run: |
+        python3 - <<'PY'
+        from pathlib import Path
+        p=Path(".github/workflows/android.yml")
+        s=p.read_text()
+        old="    - uses: android-actions/setup-android@v3"
+        if "packages: platform-tools" not in s:
+            assert old in s, "SDK action not found"
+            s=s.replace(old,old+"\n      with:\n        packages: platform-tools\n        log-accepted-android-sdk-licenses: false",1)
+        p.write_text(s)
+        p=Path("app/build.gradle.kts")
+        s=p.read_text()
+        if 'jvmTarget = "17"' not in s:
+            s+='\nandroid {\n    compileOptions {\n        sourceCompatibility = JavaVersion.VERSION_17\n        targetCompatibility = JavaVersion.VERSION_17\n    }\n    kotlinOptions { jvmTarget = "17" }\n}\n'
+        p.write_text(s)
+        p=Path(".gitignore")
+        s=p.read_text() if p.exists() else ""
+        for line in [".gradle/","**/build/","local.properties"]:
+            if line not in s.splitlines(): s+=line+"\n"
+        p.write_text(s)
+        
+        PY
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add --all
+        if ! git diff --cached --quiet; then
+          git commit -m "Fix removed Android tools package and align JVM targets [skip ci]"
+          git push origin HEAD:main
+        fi
+    - uses: actions/setup-java@v5
+      with: {distribution: temurin, java-version: '17'}
+    - uses: android-actions/setup-android@v3
+      with:
+        packages: platform-tools
+        log-accepted-android-sdk-licenses: false
+    - uses: gradle/actions/setup-gradle@v4
+      with: {gradle-version: '8.11.1'}
+    - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+    - run: gradle --no-daemon testDebugUnitTest lintDebug assembleDebug
+    - uses: actions/upload-artifact@v4
+      with:
+        name: Ahmedho-Android-APK
+        path: app/build/outputs/apk/debug/*.apk
+        if-no-files-found: error
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: Android-build-reports
+        path: app/build/reports
+        if-no-files-found: ignore
