@@ -1,0 +1,87 @@
+name: Organize and Build APK
+on:
+  push:
+    branches: [main]
+    paths: [VideoDownloader.zip, .github/workflows/android.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: {group: android-main, cancel-in-progress: false}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+    - uses: actions/checkout@v4
+    - name: Organize project and preserve originals
+      run: |
+        python3 - <<'PY'
+        from pathlib import Path
+        import zipfile,tempfile,shutil,re,stat
+        root=Path.cwd()
+        if not Path("app/build.gradle.kts").exists():
+            with tempfile.TemporaryDirectory() as tmp:
+                with zipfile.ZipFile("VideoDownloader.zip") as z:
+                    assert sum(i.file_size for i in z.infolist())<33554432,"Archive too large"
+                    assert all(not Path(i.filename).is_absolute() and ".." not in Path(i.filename).parts and not stat.S_ISLNK(i.external_attr>>16) for i in z.infolist()),"Unsafe ZIP"
+                    z.extractall(tmp)
+                projects=[p.parent for p in Path(tmp).rglob("settings.gradle.kts") if (p.parent/"app/build.gradle.kts").is_file()]
+                assert len(projects)==1,"ZIP must contain one Android project"
+                project=projects[0]
+                assert list((project/"app/src").rglob("MainActivity.kt")),"Missing MainActivity"
+                backup=Path("upload-originals")
+                backup.mkdir(exist_ok=True)
+                names="app settings.gradle.kts build.gradle.kts gradle.properties gradle gradlew gradlew.bat README.md .gitignore".split()
+                for name in names:
+                    src=project/name
+                    if not src.exists(): continue
+                    dst=Path(name)
+                    if dst.exists():
+                        assert not (backup/name).exists(),"Backup exists"
+                        shutil.move(str(dst),str(backup/name))
+                    if src.is_dir(): shutil.copytree(src,dst)
+                    else: shutil.copy2(src,dst)
+                for name in "AndroidManifest.xml DownloadScheduler.kt DownloadWorker.kt VideoDownloaderApp.kt styles.xml VideoDownloader.zip".split():
+                    if Path(name).exists():
+                        assert not (backup/name).exists(),"Backup exists"
+                        shutil.move(name,str(backup/name))
+        for p in Path("app/src").rglob("*.kt"):
+            s=p.read_text().replace("com.yausername.youtubedl_android.ffmpeg.FFmpeg","com.yausername.ffmpeg.FFmpeg")
+            old="override suspend fun doWork(): Result = try"
+            if old in s:
+                s=s.replace(old,"override suspend fun doWork(): Result { return try",1)
+                i=s.rfind("}"); s=s[:i]+"}\n"+s[i:]
+            p.write_text(s)
+        p=Path("app/src/main/AndroidManifest.xml"); s=p.read_text()
+        if "android:extractNativeLibs" not in s: s=re.sub(r"<application\b",'<application android:extractNativeLibs="true"',s,count=1)
+        p.write_text(s)
+        p=Path("app/build.gradle.kts"); s=p.read_text()
+        if "useLegacyPackaging" not in s: s=re.sub(r"android\s*\{","android {\npackaging { jniLibs.useLegacyPackaging = true }",s,count=1)
+        p.write_text(s)
+        
+        PY
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add --all
+        if ! git diff --cached --quiet; then
+          git commit -m "Organize Android project and fix FFmpeg [skip ci]"
+          git push origin HEAD:main
+        fi
+    - uses: actions/setup-java@v4
+      with: {distribution: temurin, java-version: '17'}
+    - uses: android-actions/setup-android@v3
+    - uses: gradle/actions/setup-gradle@v4
+      with: {gradle-version: '8.11.1'}
+    - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+    - run: gradle --no-daemon testDebugUnitTest lintDebug assembleDebug
+    - uses: actions/upload-artifact@v4
+      with:
+        name: Ahmedho-Android-APK
+        path: app/build/outputs/apk/debug/*.apk
+        if-no-files-found: error
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: Android-build-reports
+        path: app/build/reports
+        if-no-files-found: ignore
